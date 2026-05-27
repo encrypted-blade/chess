@@ -8,12 +8,15 @@
 #include <SFML/Graphics/Text.hpp>
 #include <SFML/Graphics/Texture.hpp>
 #include <SFML/Window/Mouse.hpp>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <vector>
+
 constexpr size_t chess_pieces_size = 24495;
 
 // ============= COLORS =============
@@ -56,7 +59,6 @@ struct SquareInfo {
   Piece piece = Piece::NONE;
   SquareColor color = SquareColor::DARK;
 };
-
 using Board = std::array<SquareInfo, 64>;
 
 // ============= GAME STATE =============
@@ -75,7 +77,11 @@ struct GameState {
   std::optional<std::uint8_t> en_passant_target;
   std::uint8_t halfmove_clock = 0;
   std::uint16_t fullmove_number = 1;
-  bool player_is_white = false; // NEW: which side the human plays
+  bool player_is_white = false;
+
+  // NEW: Game Over State
+  bool game_over = false;
+  std::string result_message = "";
 };
 
 // ============= BOARD INITIALIZATION =============
@@ -150,19 +156,14 @@ inline sf::IntRect get_texture_rect(Piece piece) noexcept {
 }
 
 // ============= MOUSE & COORDINATE HELPERS (FLIP-AWARE) =============
-// When player is White, the board is flipped so White is at the bottom.
-// We achieve this by inverting the rank in pixel<->board conversions.
-
 inline std::uint8_t display_rank_to_board_rank(std::uint8_t display_rank,
                                                bool player_is_white) noexcept {
   return player_is_white ? (7 - display_rank) : display_rank;
 }
-
 inline std::uint8_t board_rank_to_display_rank(std::uint8_t board_rank,
                                                bool player_is_white) noexcept {
   return player_is_white ? (7 - board_rank) : board_rank;
 }
-
 inline std::optional<std::uint8_t>
 pixel_to_board_index(int pixel_x, int pixel_y, bool player_is_white) noexcept {
   constexpr float SQUARE_SIZE = 64.0f;
@@ -180,7 +181,6 @@ pixel_to_board_index(int pixel_x, int pixel_y, bool player_is_white) noexcept {
   std::uint8_t rank = display_rank_to_board_rank(display_rank, player_is_white);
   return rank * 8 + file;
 }
-
 inline sf::Vector2f board_index_to_pixel(std::uint8_t idx,
                                          bool player_is_white) noexcept {
   constexpr float SQUARE_SIZE = 64.0f;
@@ -195,7 +195,6 @@ inline sf::Vector2f board_index_to_pixel(std::uint8_t idx,
 // ============================================================
 // MOVE VALIDATION ENGINE
 // ============================================================
-
 inline bool is_path_clear(const Board &board, std::uint8_t from,
                           std::uint8_t to) {
   std::uint8_t from_file = get_file(from), from_rank = get_rank(from);
@@ -215,8 +214,6 @@ inline bool is_path_clear(const Board &board, std::uint8_t from,
 inline bool is_square_attacked(const Board &board, std::uint8_t sq,
                                bool by_white) {
   std::uint8_t sq_file = get_file(sq), sq_rank = get_rank(sq);
-
-  // Pawn attacks
   int pawn_dir = by_white ? -1 : 1;
   std::uint8_t attack_rank = sq_rank + pawn_dir;
   if (attack_rank < 8) {
@@ -233,8 +230,6 @@ inline bool is_square_attacked(const Board &board, std::uint8_t sq,
         return true;
     }
   }
-
-  // Knight attacks
   constexpr int knight_moves[8][2] = {{-2, -1}, {-2, 1}, {-1, -2}, {-1, 2},
                                       {1, -2},  {1, 2},  {2, -1},  {2, 1}};
   for (const auto &m : knight_moves) {
@@ -246,8 +241,6 @@ inline bool is_square_attacked(const Board &board, std::uint8_t sq,
         return true;
     }
   }
-
-  // King attacks
   for (int df = -1; df <= 1; ++df) {
     for (int dr = -1; dr <= 1; ++dr) {
       if (df == 0 && dr == 0)
@@ -261,8 +254,6 @@ inline bool is_square_attacked(const Board &board, std::uint8_t sq,
       }
     }
   }
-
-  // Rook/Queen (straight)
   constexpr int rook_dirs[4][2] = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
   for (const auto &d : rook_dirs) {
     int cf = sq_file + d[0], cr = sq_rank + d[1];
@@ -279,8 +270,6 @@ inline bool is_square_attacked(const Board &board, std::uint8_t sq,
       cr += d[1];
     }
   }
-
-  // Bishop/Queen (diagonal)
   constexpr int bishop_dirs[4][2] = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
   for (const auto &d : bishop_dirs) {
     int cf = sq_file + d[0], cr = sq_rank + d[1];
@@ -337,7 +326,6 @@ inline bool is_valid_pawn_move(const Board &board, std::uint8_t from,
   int direction = is_white ? 1 : -1;
   int rank_diff = static_cast<int>(to_rank) - static_cast<int>(from_rank);
   int file_diff = static_cast<int>(to_file) - static_cast<int>(from_file);
-
   if (file_diff == 0) {
     if (rank_diff == direction)
       return board[to].piece == Piece::NONE;
@@ -365,7 +353,6 @@ inline bool is_valid_knight_move(std::uint8_t from, std::uint8_t to) {
                     static_cast<int>(get_rank(from)));
   return (fd == 2 && rd == 1) || (fd == 1 && rd == 2);
 }
-
 inline bool is_valid_bishop_move(const Board &board, std::uint8_t from,
                                  std::uint8_t to) {
   int fd = std::abs(static_cast<int>(get_file(to)) -
@@ -376,7 +363,6 @@ inline bool is_valid_bishop_move(const Board &board, std::uint8_t from,
     return false;
   return is_path_clear(board, from, to);
 }
-
 inline bool is_valid_rook_move(const Board &board, std::uint8_t from,
                                std::uint8_t to) {
   bool same_file = (get_file(from) == get_file(to));
@@ -385,13 +371,11 @@ inline bool is_valid_rook_move(const Board &board, std::uint8_t from,
     return false;
   return is_path_clear(board, from, to);
 }
-
 inline bool is_valid_queen_move(const Board &board, std::uint8_t from,
                                 std::uint8_t to) {
   return is_valid_bishop_move(board, from, to) ||
          is_valid_rook_move(board, from, to);
 }
-
 inline bool is_valid_king_move(std::uint8_t from, std::uint8_t to) {
   int fd = std::abs(static_cast<int>(get_file(to)) -
                     static_cast<int>(get_file(from)));
@@ -413,7 +397,6 @@ inline bool can_castle(const Board &board, const GameState &state,
     if (!kingside && !state.black_queenside_castle)
       return false;
   }
-
   std::uint8_t king_rank = is_white ? 0 : 7;
   std::uint8_t king_pos = file_rank_to_index(4, king_rank);
   if (board[king_pos].piece !=
@@ -421,19 +404,16 @@ inline bool can_castle(const Board &board, const GameState &state,
     return false;
   if (is_in_check(board, is_white))
     return false;
-
   std::uint8_t rook_file = kingside ? 7 : 0;
   std::uint8_t rook_pos = file_rank_to_index(rook_file, king_rank);
   Piece expected_rook = is_white ? Piece::WHITE_ROOK : Piece::BLACK_ROOK;
   if (board[rook_pos].piece != expected_rook)
     return false;
-
   int step = kingside ? 1 : -1;
   for (int f = 4 + step; f != rook_file; f += step) {
     if (board[file_rank_to_index(f, king_rank)].piece != Piece::NONE)
       return false;
   }
-
   for (int f = 4 + step; (kingside ? f <= 6 : f >= 2); f += step) {
     if (is_square_attacked(board, file_rank_to_index(f, king_rank), !is_white))
       return false;
@@ -453,14 +433,11 @@ inline bool is_valid_move(const Board &board, std::uint8_t from,
   bool is_white = is_white_piece(moving_piece);
   if (is_white != state.white_to_move)
     return false;
-
   Piece target = board[to].piece;
   if (target != Piece::NONE && is_same_color(moving_piece, target))
     return false;
-
   Piece type = piece_type(moving_piece);
   bool valid = false;
-
   switch (type) {
   case Piece::WHITE_PAWN:
     valid = is_valid_pawn_move(board, from, to, state, is_white);
@@ -489,11 +466,8 @@ inline bool is_valid_move(const Board &board, std::uint8_t from,
   default:
     valid = false;
   }
-
   if (!valid)
     return false;
-
-  // Test if move leaves king in check
   Board test = make_move(board, from, to);
   return !is_in_check(test, is_white);
 }
@@ -501,7 +475,6 @@ inline bool is_valid_move(const Board &board, std::uint8_t from,
 // ============================================================
 // EVENT HANDLING & MOVE EXECUTION
 // ============================================================
-
 inline void update_castling_rights(GameState &state, std::uint8_t from,
                                    Piece moved) {
   if (moved == Piece::WHITE_KING) {
@@ -527,8 +500,6 @@ inline void execute_move(Board &board, GameState &state, std::uint8_t from,
                          std::uint8_t to) {
   Piece moving_piece = board[from].piece;
   bool is_white = is_white_piece(moving_piece);
-
-  // Handle castling
   if (piece_type(moving_piece) == Piece::WHITE_KING) {
     std::uint8_t from_file = get_file(from), to_file = get_file(to);
     std::uint8_t rank = get_rank(from);
@@ -548,15 +519,11 @@ inline void execute_move(Board &board, GameState &state, std::uint8_t from,
     else
       state.black_king_pos = to;
   }
-
-  // Handle en passant capture
   if (piece_type(moving_piece) == Piece::WHITE_PAWN &&
       state.en_passant_target && to == state.en_passant_target.value()) {
     std::uint8_t captured_rank = is_white ? get_rank(to) - 1 : get_rank(to) + 1;
     board[file_rank_to_index(get_file(to), captured_rank)].piece = Piece::NONE;
   }
-
-  // Set en passant target
   state.en_passant_target = std::nullopt;
   if (piece_type(moving_piece) == Piece::WHITE_PAWN) {
     int rank_diff =
@@ -566,8 +533,6 @@ inline void execute_move(Board &board, GameState &state, std::uint8_t from,
       state.en_passant_target = file_rank_to_index(get_file(from), ep_rank);
     }
   }
-
-  // Update clocks
   if (piece_type(moving_piece) == Piece::WHITE_PAWN ||
       board[to].piece != Piece::NONE)
     state.halfmove_clock = 0;
@@ -575,18 +540,13 @@ inline void execute_move(Board &board, GameState &state, std::uint8_t from,
     state.halfmove_clock++;
   if (!is_white)
     state.fullmove_number++;
-
-  // Execute move
   board[to].piece = moving_piece;
   board[from].piece = Piece::NONE;
-
-  // Promotion
   if (piece_type(moving_piece) == Piece::WHITE_PAWN) {
     if ((is_white && get_rank(to) == 7) || (!is_white && get_rank(to) == 0)) {
       board[to].piece = is_white ? Piece::WHITE_QUEEN : Piece::BLACK_QUEEN;
     }
   }
-
   update_castling_rights(state, from, moving_piece);
   state.last_from = from;
   state.last_to = to;
@@ -602,6 +562,19 @@ inline void handle_events(sf::RenderWindow &window, Board &board,
     } else if (const auto *mouse_click =
                    event->getIf<sf::Event::MouseButtonPressed>()) {
       if (mouse_click->button == sf::Mouse::Button::Left) {
+        // Handle Game Over Restart
+        if (state.game_over) {
+          bool was_white = state.player_is_white;
+          state = GameState{};
+          state.player_is_white = was_white;
+          board = make_canonical_board();
+          continue;
+        }
+
+        // Block input if it's the bot's turn
+        if (state.white_to_move != state.player_is_white)
+          continue;
+
         auto target_idx = pixel_to_board_index(mouse_click->position.x,
                                                mouse_click->position.y,
                                                state.player_is_white);
@@ -609,7 +582,6 @@ inline void handle_events(sf::RenderWindow &window, Board &board,
           state.selected_square = std::nullopt;
           continue;
         }
-
         std::uint8_t target = target_idx.value();
         if (!state.selected_square) {
           if (board[target].piece != Piece::NONE &&
@@ -618,13 +590,11 @@ inline void handle_events(sf::RenderWindow &window, Board &board,
           }
           continue;
         }
-
         std::uint8_t from = state.selected_square.value();
         if (from == target) {
           state.selected_square = std::nullopt;
           continue;
         }
-
         if (is_valid_move(board, from, target, state)) {
           execute_move(board, state, from, target);
           state.selected_square = std::nullopt;
@@ -640,19 +610,155 @@ inline void handle_events(sf::RenderWindow &window, Board &board,
 }
 
 // ============================================================
+// BOT LOGIC (MINIMAX WITH ALPHA-BETA PRUNING)
+// ============================================================
+struct Move {
+  std::uint8_t from;
+  std::uint8_t to;
+};
+
+inline std::vector<Move> generate_moves(const Board &board,
+                                        const GameState &state) {
+  std::vector<Move> moves;
+  for (std::uint8_t from = 0; from < 64; ++from) {
+    if (board[from].piece != Piece::NONE &&
+        is_white_piece(board[from].piece) == state.white_to_move) {
+      for (std::uint8_t to = 0; to < 64; ++to) {
+        if (is_valid_move(board, from, to, state)) {
+          moves.push_back({from, to});
+        }
+      }
+    }
+  }
+  return moves;
+}
+
+inline int evaluate(const Board &board) {
+  int score = 0;
+  for (int i = 0; i < 64; ++i) {
+    Piece p = board[i].piece;
+    if (p != Piece::NONE) {
+      int val = 0;
+      switch (piece_type(p)) {
+      case Piece::WHITE_KING:
+        val = 20000;
+        break;
+      case Piece::WHITE_QUEEN:
+        val = 900;
+        break;
+      case Piece::WHITE_ROOK:
+        val = 500;
+        break;
+      case Piece::WHITE_BISHOP:
+        val = 330;
+        break;
+      case Piece::WHITE_KNIGHT:
+        val = 320;
+        break;
+      case Piece::WHITE_PAWN:
+        val = 100;
+        break;
+      default:
+        break;
+      }
+      if (is_white_piece(p))
+        score += val;
+      else
+        score -= val;
+    }
+  }
+  return score;
+}
+
+inline int minimax(Board board, GameState state, int depth, int alpha, int beta,
+                   bool maximizing) {
+  if (depth == 0)
+    return evaluate(board);
+  auto moves = generate_moves(board, state);
+  if (moves.empty()) {
+    if (is_in_check(board, state.white_to_move))
+      return maximizing ? -100000 + (3 - depth) : 100000 - (3 - depth);
+    else
+      return 0; // Stalemate
+  }
+  if (maximizing) {
+    int maxEval = -1000000;
+    for (const auto &m : moves) {
+      Board next_board = board;
+      GameState next_state = state;
+      execute_move(next_board, next_state, m.from, m.to);
+      int eval = minimax(next_board, next_state, depth - 1, alpha, beta, false);
+      maxEval = std::max(maxEval, eval);
+      alpha = std::max(alpha, eval);
+      if (beta <= alpha)
+        break;
+    }
+    return maxEval;
+  } else {
+    int minEval = 1000000;
+    for (const auto &m : moves) {
+      Board next_board = board;
+      GameState next_state = state;
+      execute_move(next_board, next_state, m.from, m.to);
+      int eval = minimax(next_board, next_state, depth - 1, alpha, beta, true);
+      minEval = std::min(minEval, eval);
+      beta = std::min(beta, eval);
+      if (beta <= alpha)
+        break;
+    }
+    return minEval;
+  }
+}
+
+inline Move get_best_move(Board &board, GameState &state) {
+  auto moves = generate_moves(board, state);
+  Move best_move = moves[0];
+  int best_eval = state.white_to_move ? -1000000 : 1000000;
+  constexpr int DEPTH = 2; // Depth 2 ensures the UI doesn't freeze noticeably
+  for (const auto &m : moves) {
+    Board next_board = board;
+    GameState next_state = state;
+    execute_move(next_board, next_state, m.from, m.to);
+    int eval = minimax(next_board, next_state, DEPTH - 1, -1000000, 1000000,
+                       !state.white_to_move);
+    if (state.white_to_move) {
+      if (eval > best_eval) {
+        best_eval = eval;
+        best_move = m;
+      }
+    } else {
+      if (eval < best_eval) {
+        best_eval = eval;
+        best_move = m;
+      }
+    }
+  }
+  return best_move;
+}
+
+inline void check_game_over(Board &board, GameState &state) {
+  auto moves = generate_moves(board, state);
+  if (moves.empty()) {
+    state.game_over = true;
+    if (is_in_check(board, state.white_to_move)) {
+      state.result_message = state.white_to_move ? "Black wins by checkmate!"
+                                                 : "White wins by checkmate!";
+    } else {
+      state.result_message = "Draw by stalemate!";
+    }
+  }
+}
+
+// ============================================================
 // SIDE SELECTION SCREEN
 // ============================================================
-
-/////////////// Pay attention here and replace with paths on your system for
-///fonts ////////////
-sf::Font k{sf::Font("/usr/share/fonts/TTF/Hack-BoldItalic.ttf")};
+sf::Font k{sf::Font("src/PlaywriteGBSGuides-Regular.ttf")};
 sf::Text nothingToSee{k, "something", 30};
 
 struct Button {
   sf::RectangleShape shape;
   sf::Text text{nothingToSee};
   bool hovered = false;
-
   Button(const sf::Font &font, const std::string &label, sf::Vector2f position,
          sf::Vector2f size) {
     shape.setSize(size);
@@ -662,22 +768,18 @@ struct Button {
     text.setString(label);
     text.setCharacterSize(28);
     text.setFillColor(BUTTON_TEXT_COLOR);
-    // Center text in button
     sf::FloatRect textBounds = text.getLocalBounds();
     text.setOrigin({textBounds.position.x + textBounds.size.x / 2.0f,
                     textBounds.position.y + textBounds.size.y / 2.0f});
     text.setPosition({position.x + size.x / 2.0f, position.y + size.y / 2.0f});
   }
-
   bool contains(sf::Vector2f point) const {
     return shape.getGlobalBounds().contains(point);
   }
-
   void setHovered(bool h) {
     hovered = h;
     shape.setFillColor(hovered ? BUTTON_HOVER_COLOR : BUTTON_COLOR);
   }
-
   void draw(sf::RenderWindow &window) const {
     window.draw(shape);
     window.draw(text);
@@ -689,42 +791,33 @@ enum class AppState { SIDE_SELECTION, PLAYING };
 inline bool run_side_selection(sf::RenderWindow &window, GameState &state,
                                const sf::Font &font) {
   AppState app_state = AppState::SIDE_SELECTION;
-
-  // Title text
   sf::Text title(font, "Choose Your Side", 42);
   title.setFillColor(TITLE_COLOR);
   sf::FloatRect titleBounds = title.getLocalBounds();
   title.setOrigin({titleBounds.position.x + titleBounds.size.x / 2.0f,
                    titleBounds.position.y + titleBounds.size.y / 2.0f});
   title.setPosition({288.0f, 150.0f});
-
-  // Subtitle
   sf::Text subtitle(font, "White pieces move first", 18);
   subtitle.setFillColor(sf::Color(200, 200, 200));
   sf::FloatRect subBounds = subtitle.getLocalBounds();
   subtitle.setOrigin({subBounds.position.x + subBounds.size.x / 2.0f,
                       subBounds.position.y + subBounds.size.y / 2.0f});
   subtitle.setPosition({288.0f, 200.0f});
-
-  // Buttons
   Button whiteBtn(font, "Play as White", {188.0f, 260.0f}, {200.0f, 60.0f});
   Button blackBtn(font, "Play as Black", {188.0f, 350.0f}, {200.0f, 60.0f});
 
   while (window.isOpen() && app_state == AppState::SIDE_SELECTION) {
-    // Event handling
     while (const auto event = window.pollEvent()) {
       if (event->is<sf::Event::Closed>()) {
         window.close();
         return false;
       }
-
       if (const auto *mouseMoved = event->getIf<sf::Event::MouseMoved>()) {
         sf::Vector2f mousePos(static_cast<float>(mouseMoved->position.x),
                               static_cast<float>(mouseMoved->position.y));
         whiteBtn.setHovered(whiteBtn.contains(mousePos));
         blackBtn.setHovered(blackBtn.contains(mousePos));
       }
-
       if (const auto *mouseClick =
               event->getIf<sf::Event::MouseButtonPressed>()) {
         if (mouseClick->button == sf::Mouse::Button::Left) {
@@ -740,8 +833,6 @@ inline bool run_side_selection(sf::RenderWindow &window, GameState &state,
         }
       }
     }
-
-    // Render
     window.clear(DUSTY_GRAPE);
     window.draw(title);
     window.draw(subtitle);
@@ -749,25 +840,20 @@ inline bool run_side_selection(sf::RenderWindow &window, GameState &state,
     blackBtn.draw(window);
     window.display();
   }
-
   return window.isOpen();
 }
 
 // ============================================================
 // RENDERING
 // ============================================================
-
 inline void draw_board(const Board &board, sf::RenderWindow &window,
                        sf::RectangleShape &square, sf::Sprite &piece_sprite,
                        const GameState &state, sf::RectangleShape &highlight) {
   constexpr float SQUARE_SIZE = 64.0f;
-  constexpr float MARGIN = 32.0f;
-
   for (std::uint8_t idx = 0; idx < 64; ++idx) {
     const SquareInfo &info = board[idx];
     sf::Color square_color =
         (info.color == SquareColor::DARK) ? DUSTY_GRAPE : LIGHT_YELLOW;
-
     if (state.selected_square == idx)
       square_color = SELECTION_COLOR;
     else if (state.last_from == idx || state.last_to == idx)
@@ -778,20 +864,16 @@ inline void draw_board(const Board &board, sf::RenderWindow &window,
           (!state.white_to_move && piece == Piece::BLACK_KING))
         square_color = CHECK_COLOR;
     }
-
     square.setFillColor(square_color);
     sf::Vector2f pos = board_index_to_pixel(idx, state.player_is_white);
     square.setPosition(pos);
     window.draw(square);
-
     if (info.piece != Piece::NONE) {
       piece_sprite.setTextureRect(get_texture_rect(info.piece));
       piece_sprite.setPosition(pos);
       window.draw(piece_sprite);
     }
   }
-
-  // Valid move indicators
   if (state.selected_square) {
     std::uint8_t from = state.selected_square.value();
     for (std::uint8_t to = 0; to < 64; ++to) {
@@ -826,22 +908,18 @@ inline sf::RectangleShape create_highlight_square() {
   return sq;
 }
 inline sf::RenderWindow create_window() {
-  return sf::RenderWindow{sf::VideoMode{{576, 576}},
-                          "Chess with Move Validation", sf::Style::Close};
+  return sf::RenderWindow{sf::VideoMode{{576, 576}}, "Chess vs Bot",
+                          sf::Style::Close};
 }
 
 // ============= MAIN =============
 int main() {
   auto window = create_window();
-
-  // Load font for UI
   sf::Font font;
   bool font_loaded = false;
-
-  // Try to load system fonts
-  /////////////// Pay attention here and add with paths on your system for fonts
-  ///////////////
   const char *fontPaths[] = {
+      "src/PlaywriteGBSGuides-Regular.ttf",
+      // Continue if you don't want the provided font
       "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
       "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
       "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
@@ -850,50 +928,75 @@ int main() {
       "C://Windows/Fonts/arial.ttf",
       "/usr/share/fonts/TTF/Hack-BoldItalic.ttf",
       nullptr};
-
   for (int i = 0; fontPaths[i] != nullptr; ++i) {
     if (font.openFromFile(fontPaths[i])) {
       font_loaded = true;
       break;
     }
   }
-
-  if (!font_loaded) {
-    std::cerr << "Warning: Could not load font. UI may not display correctly."
-              << std::endl;
-  }
+  if (!font_loaded)
+    std::cerr << "Warning: Could not load font." << std::endl;
 
   GameState state{};
-
-  // Run side selection screen
   if (font_loaded) {
-    if (!run_side_selection(window, state, font)) {
-      return 0; // Window closed during selection
-    }
+    if (!run_side_selection(window, state, font))
+      return 0;
   } else {
-    // Default to White if no font available
     state.player_is_white = true;
   }
 
   Board board = make_canonical_board();
-
   auto square = create_square();
   auto highlight_square = create_highlight_square();
-
   sf::Texture pieces_texture;
   if (!pieces_texture.loadFromMemory(chess_pieces, chess_pieces_size)) {
     std::cerr << "Failed to load piece textures!" << std::endl;
     return 1;
   }
-
   sf::Sprite piece_sprite{pieces_texture};
 
   while (window.isOpen()) {
     handle_events(window, board, state);
+
+    // Check game over condition continuously
+    if (!state.game_over) {
+      check_game_over(board, state);
+    }
+
+    // Bot's Turn Execution
+    if (!state.game_over && state.white_to_move != state.player_is_white) {
+      Move bot_move = get_best_move(board, state);
+      execute_move(board, state, bot_move.from, bot_move.to);
+      check_game_over(board, state);
+    }
+
     window.clear(OCEAN_MIST);
     draw_board(board, window, square, piece_sprite, state, highlight_square);
+
+    // Draw Game Over Overlay
+    if (state.game_over) {
+      sf::RectangleShape overlay({576.0f, 576.0f});
+      overlay.setFillColor(sf::Color(0, 0, 0, 150));
+      window.draw(overlay);
+
+      sf::Text gameOverText(font, state.result_message, 36);
+      gameOverText.setFillColor(sf::Color::White);
+      sf::FloatRect bounds = gameOverText.getLocalBounds();
+      gameOverText.setOrigin({bounds.position.x + bounds.size.x / 2.0f,
+                              bounds.position.y + bounds.size.y / 2.0f});
+      gameOverText.setPosition({288.0f, 260.0f});
+      window.draw(gameOverText);
+
+      sf::Text restartText(font, "Click anywhere to restart", 20);
+      restartText.setFillColor(sf::Color(200, 200, 200));
+      sf::FloatRect rBounds = restartText.getLocalBounds();
+      restartText.setOrigin({rBounds.position.x + rBounds.size.x / 2.0f,
+                             rBounds.position.y + rBounds.size.y / 2.0f});
+      restartText.setPosition({288.0f, 320.0f});
+      window.draw(restartText);
+    }
+
     window.display();
   }
-
   return 0;
 }
